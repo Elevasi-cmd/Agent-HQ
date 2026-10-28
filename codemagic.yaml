@@ -1,0 +1,54 @@
+# Agent HQ for iPhone: build in the cloud on Codemagic's Macs and send to TestFlight. No local Mac or Xcode needed.
+# One-time setup is in README.md ("TestFlight without a Mac"). Change the three values under vars, then push to main
+# (or press "Start new build" in Codemagic).
+workflows:
+  ios-testflight:
+    name: Agent HQ · iOS · TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 45
+    integrations:
+      app_store_connect: Agent HQ ASC        # the name you gave your App Store Connect API key in Codemagic
+    environment:
+      groups:
+        - code_signing                         # holds CERTIFICATE_PRIVATE_KEY (secret)
+      vars:
+        BUNDLE_ID: "com.atarah.agenthq"        # must match the App ID and the App Store Connect app
+        APP_STORE_APPLE_ID: "0000000000"       # the app's Apple ID number from App Store Connect (App Information)
+        PUSH_ENABLED: "false"                  # set "true" after enabling Push Notifications on the App ID
+      node: v22.11.0
+      xcode: latest
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+    scripts:
+      - name: Install
+        script: npm ci
+      - name: Test the phone layer
+        script: npm test
+      - name: Build the app's web layer and apply iOS settings
+        script: |
+          npm run build
+          node scripts/ios-config.js
+          npx cap sync ios
+      - name: Signing (certificate and profile are created automatically if missing)
+        script: |
+          keychain initialize
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create
+          keychain add-certificates
+          xcode-project use-profiles
+      - name: Build number (one higher than the latest TestFlight build)
+        script: |
+          LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" 2>/dev/null || echo 0)
+          cd ios/App && agvtool new-version -all $((LATEST + 1))
+      - name: Build the app
+        script: xcode-project build-ipa --project "ios/App/App.xcodeproj" --scheme "App"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true

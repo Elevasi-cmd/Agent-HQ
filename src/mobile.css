@@ -1,0 +1,75 @@
+/* Agent HQ for iPhone: touch, safe areas and the Atarah panel. Loaded after the office page's own styles. */
+html.hq-app, html.hq-app body { -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; overscroll-behavior: none; }
+html.hq-app body { -webkit-user-select: none; user-select: none; padding-top: env(safe-area-inset-top); padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+html.hq-app input, html.hq-app textarea { -webkit-user-select: text; user-select: text; }
+html.hq-native #sFull { display: none !important; }
+html.hq-app #tools { overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+html.hq-app #tools::-webkit-scrollbar { display: none; }
+@media (pointer: coarse) { html.hq-app .sbtn { min-height: 40px; min-width: 40px; } }
+
+#mq { position: fixed; right: calc(10px + env(safe-area-inset-right)); bottom: calc(10px + env(safe-area-inset-bottom)); z-index: 60; display: flex; align-items: center; gap: 8px; pointer-events: none; }
+#mq > * { pointer-events: auto; }
+.mq-chip { font-family: var(--f-pixel); font-size: 9px; padding: 8px 10px; border: 2px solid #05060C; background: #1C2440; color: #E8E2D0; box-shadow: 2px 2px 0 #05060C; }
+.mq-chip.local, .mq-mode.local { color: #63D68F; }
+.mq-chip.cloud, .mq-mode.cloud { color: #F2C14E; }
+.mq-chip.away, .mq-mode.away { color: #E8A0A0; }
+.mq-chip.offline, .mq-mode.offline { color: #9AA0B4; }
+.mq-chip.pair, .mq-mode.pair { color: #8FD3E8; }
+.mq-talk { position: relative; width: 52px; height: 52px; border-radius: 50%; border: 3px solid #C9A24E; background: #14121A; box-shadow: 2px 2px 0 #05060C; }
+.mq-talk::after { content: attr(data-n); position: absolute; top: -6px; right: -6px; min-width: 18px; padding: 2px 4px; background: #F2C14E; color: #05060C; font-family: var(--f-pixel); font-size: 8px; border: 2px solid #05060C; }
+.mq-talk[data-n=""]::after { display: none; }
+.mq-crown { position: absolute; left: 12px; top: 15px; width: 22px; height: 16px; background:
+  linear-gradient(#E8C060, #E8C060) 0 10px / 22px 6px no-repeat,
+  linear-gradient(135deg, transparent 50%, #E8C060 50%) 0 2px / 8px 8px no-repeat,
+  linear-gradient(225deg, transparent 50%, #E8C060 50%) 14px 2px / 8px 8px no-repeat,
+  linear-gradient(#E8C060, #E8C060) 9px 0 / 4px 10px no-repeat; }
+
+.mq-sheet { position: fixed; inset: 0; z-index: 70; background: #0B0F1C; color: #E8E2D0; display: flex; flex-direction: column; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); font-family: var(--f-body); font-size: 19px; }
+.mq-sheet[hidden] { display: none; }
+.mq-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 2px solid #1C2440; }
+.mq-title { font-family: var(--f-pixel); font-size: 12px; color: #E8C060; }
+.mq-mode { font-family: var(--f-pixel); font-size: 8px; flex: 1; }
+.mq-x { font-family: var(--f-pixel); font-size: 12px; background: #1C2440; color: #E8E2D0; border: 2px solid #05060C; width: 40px; height: 40px; }
+.mq-tabs { display: flex; gap: 4px; padding: 8px 10px 0; overflow-x: auto; }
+.mq-tabs button { font-family: var(--f-pixel); font-size: 9px; padding: 9px 10px; background: #121A30; color: #9AA0B4; border: 2px solid #1C2440; border-bottom: none; white-space: nowrap; }
+.mq-tabs button[aria-selected="true"] { background: #1C2440; color: #E8E2D0; }
+.mq-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; overflow-y: auto; border-top: 2px solid #1C2440; }
+.mq-body h4 { font-family: var(--f-pixel); font-size: 9px; color: #E8C060; margin: 10px 0 0; }
+.mq-note { margin: 0; color: #B8BCC8; font-size: 17px; line-height: 1.25; }
+.mq-talklist { flex: 1; min-height: 120px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.mq-msg { padding: 8px 10px; border: 2px solid #1C2440; background: #121A30; line-height: 1.25; white-space: pre-wrap; }
+.mq-msg b { display: block; font-family: var(--f-pixel); font-size: 7px; margin-bottom: 4px; color: #9AA0B4; font-weight: normal; }
+.mq-msg.me { align-self: flex-end; background: #1C2A48; max-width: 85%; }
+.mq-msg.nexus { border-color: #C9A24E; max-width: 90%; }
+.mq-msg.nexus b { color: #E8C060; }
+.mq-msg.cloud { border-color: #F2C14E; border-style: dashed; max-width: 90%; }
+.mq-msg.cloud b { color: #F2C14E; }
+.mq-msg.note { background: transparent; border-style: dotted; color: #B8BCC8; font-size: 16px; }
+.mq-compose { display: flex; gap: 6px; align-items: stretch; }
+.mq-compose textarea { flex: 1; min-width: 0; font: inherit; font-size: 19px; background: #05060C; color: #E8E2D0; border: 2px solid #2A3560; padding: 6px 8px; resize: none; }
+.mq-btn { font-family: var(--f-pixel); font-size: 9px; padding: 10px 12px; background: #1C2440; color: #E8E2D0; border: 2px solid #05060C; box-shadow: 2px 2px 0 #05060C; min-height: 40px; }
+.mq-btn.gold { background: #F2C14E; color: #05060C; }
+.mq-btn[disabled] { opacity: .45; }
+.mq-check { display: flex; gap: 8px; align-items: flex-start; font-size: 17px; color: #D8D4C8; }
+.mq-check input { width: 20px; height: 20px; flex: none; margin-top: 2px; accent-color: #F2C14E; }
+.mq-check.big { font-size: 19px; color: #E8E2D0; }
+.mq-field { display: flex; flex-direction: column; gap: 4px; font-family: var(--f-pixel); font-size: 8px; color: #9AA0B4; }
+.mq-field input { font-family: var(--f-body); font-size: 19px; background: #05060C; color: #E8E2D0; border: 2px solid #2A3560; padding: 8px; min-width: 0; }
+.mq-field.small input { width: 110px; }
+.mq-rowb { display: flex; gap: 6px; flex-wrap: wrap; align-items: flex-end; }
+.mq-kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 18px; }
+.mq-kv dt { color: #9AA0B4; }
+.mq-kv dd { margin: 0; }
+.mq-list { display: flex; flex-direction: column; gap: 6px; }
+.mq-row { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border: 2px solid #1C2440; background: #121A30; }
+.mq-row .grow { flex: 1; min-width: 0; }
+.mq-row .muted, .mq-note .muted { color: #8A90A4; }
+.mq-state { font-family: var(--f-pixel); font-size: 7px; padding: 3px 5px; border: 2px solid #05060C; color: #05060C; background: #F2C14E; white-space: nowrap; }
+.mq-state.done { background: #63D68F; }
+.mq-state.failed { background: #E36B6B; }
+.mq-state.sending { background: #8FD3E8; }
+.mq-prov { border: 2px solid #1C2440; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; background: #0E1324; }
+.mq-prov > b { font-family: var(--f-pixel); font-size: 9px; font-weight: normal; }
+.mq-prov .mq-state { align-self: flex-start; }
+/* in portrait the office page shows a "turn sideways" hint along the bottom; sit above it */
+@media (orientation: portrait) { #mq { bottom: calc(96px + env(safe-area-inset-bottom)); } }

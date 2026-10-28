@@ -1,0 +1,26 @@
+{
+  "name": "agent-hq-ios",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent HQ for iPhone: the office, Atarah, approvals and a cloud fallback, connected to your desktop bridge over Tailscale.",
+  "scripts": {
+    "build": "node scripts/build-www.js",
+    "sync": "npm run build && npx cap sync ios",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "dependencies": {
+    "@aparajita/capacitor-secure-storage": "8.0.1",
+    "@capacitor/app": "8.1.2",
+    "@capacitor/core": "8.5.3",
+    "@capacitor/ios": "8.5.3",
+    "@capacitor/keyboard": "8.0.6",
+    "@capacitor/network": "8.0.1",
+    "@capacitor/preferences": "8.0.1",
+    "@capacitor/push-notifications": "8.1.3",
+    "@capacitor/status-bar": "8.0.4"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.3",
+    "esbuild": "^0.28.2"
+  }
+}
