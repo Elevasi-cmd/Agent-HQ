@@ -2,8 +2,8 @@
 # One-time setup: README.md, "First TestFlight build". Secrets live only in Codemagic (never in this repository):
 #   - App Store Connect API key  -> Codemagic Team settings > Integrations > Developer Portal (named below)
 #   - CERTIFICATE_PRIVATE_KEY    -> Codemagic environment variable group "code_signing", marked Secret
-# Set APP_STORE_APPLE_ID below to your app's Apple ID (App Store Connect > your app > App Information), then start a
-# build from Codemagic or push to main.
+# Set APP_STORE_APPLE_ID below to your app's Apple ID (App Store Connect > your app > App Information), then press
+# "Start new build" in Codemagic.
 workflows:
   ios-testflight:
     name: Agent HQ · iOS · TestFlight
@@ -20,13 +20,8 @@ workflows:
         PUSH_ENABLED: "false"                  # "true" only after Push Notifications is ticked on the App ID
       node: v22.11.0
       xcode: latest
-    triggering:
-      events:
-        - push
-      branch_patterns:
-        - pattern: main
-          include: true
-      cancel_previous_builds: true
+    # No automatic triggers: builds run only when you press "Start new build" in Codemagic, so pushes don't use
+    # build minutes. To build on every push to main later, add a triggering section (events: push, branch main).
     scripts:
       - name: Install
         script: npm ci

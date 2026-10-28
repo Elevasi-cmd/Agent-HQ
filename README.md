@@ -63,7 +63,7 @@ You don't create certificates or profiles yourself: the build creates them.
 3. Make a signing key on your PC (PowerShell or any terminal), pressing Enter twice when asked for a passphrase:
    `ssh-keygen -t rsa -b 2048 -m PEM -f "$HOME/agenthq_signing_key"`
 4. In the app's Environment variables, create group **`code_signing`** with variable **`CERTIFICATE_PRIVATE_KEY`**: paste the whole content of `agenthq_signing_key` (including the BEGIN and END lines) and tick **Secret**. Keep that file somewhere safe (a password manager), or delete it: Codemagic now holds it.
-5. Start a build of **Agent HQ · iOS · TestFlight** (or push to `main`).
+5. Start a build of **Agent HQ · iOS · TestFlight** with **Start new build**. Pushing to GitHub does not start builds, so no minutes are used until you choose to.
 
 **What the build does:** installs, runs the phone tests, builds the web layer, applies iOS settings, runs the preflight (`scripts/check-ios.js`), creates or fetches the distribution certificate and App Store profile, numbers the build, compiles, signs and uploads. Builds are marked for internal TestFlight testing only, so there's no Apple review. After Apple processes the build (usually 5 to 30 minutes), it appears in the **TestFlight** app on your iPhone, signed in with the same Apple ID.
 
