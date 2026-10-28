@@ -21,13 +21,17 @@ const S = { link: { base: '', name: 'iPhone', deviceId: null }, fb: H.defaults()
 const listeners = [], early = [];
 window.HQ_TRANSPORT = {
   stream(fn) { listeners.push(fn); early.splice(0).forEach(m => fn(m)); },
-  decide(hookId, decision, reason) { queue('decide', { hookId, decision, reason: reason || (decision === 'allow' ? 'Approved on iPhone' : 'Declined on iPhone') }, decision === 'allow' ? 'Allow a held step' : 'Decline a held step'); },
+  // approvals go only while the desktop is connected; one whose delivery is uncertain is checked, never resent
+  canDecide() { if (conn.state === 'local') return true; flash('Not connected to your desktop. Decisions are only sent while connected; they are never queued for later.'); return false; },
+  decide(hookId, decision, reason) { queue('decide', { hookId, decision, reason: reason || (decision === 'allow' ? 'Approved on iPhone' : 'Declined on iPhone') }, decision === 'allow' ? 'Allow a held step' : 'Decline a held step', { noResend: true }); },
 };
 function dispatch(msg) {
   if (!listeners.length) { early.push(msg); if (early.length > 300) early.shift(); }
   listeners.forEach(fn => { try { fn(msg); } catch (e) { console.error(e); } });
   if (msg.type === 'hello') { S.nexus = msg.nexus || null; render(); }
   if (msg.type === 'nexus' && msg.msg && msg.msg.type === 'say') addTalk({ role: 'assistant', src: 'nexus', text: msg.msg.text });
+  if (msg.type === 'gateway' && msg.msg && msg.msg.type === 'note') addTalk({ role: 'note', text: msg.msg.text });
+  if (msg.type !== 'bridge-down') { S.lastLocalAt = Date.now(); if (!S.savedAt || S.lastLocalAt - S.savedAt > 30000) { S.savedAt = S.lastLocalAt; kv.set('lastLocalAt', S.lastLocalAt); } }
 }
 
 // ---------- link, queue ----------
@@ -45,20 +49,22 @@ async function sendCmd(it) {
   return { ok: false, error: (r.json && r.json.error) || 'status ' + r.status };
 }
 async function flush() { if (conn.state !== 'local') return; await outbox.flush(sendCmd); render(); }
-async function queue(type, payload, label) { await outbox.add(type, payload, label); render(); flush(); }
+async function queue(type, payload, label, opts) { await outbox.add(type, payload, label, opts); render(); flush(); }
 
 let prevState = null;
 async function onLinkState(s) {
   if (s === 'local' && prevState !== 'local') {
+    S.lastLocalAt = Date.now(); kv.set('lastLocalAt', S.lastLocalAt);
+    await outbox.resolveUnknown(async it => { const r = await conn.request('/m/command/' + encodeURIComponent(it.id)); if (r.status !== 200) throw new Error('not now'); return r.json; });
     await reconcile(); await flush();
     if (S.pushToken) conn.request('/m/push-token', { method: 'POST', body: { token: S.pushToken } }).catch(() => {});
   }
   prevState = s; render();
 }
-// When the desktop comes back, hand Nexus the conversation it missed, as one command.
+// When the desktop comes back, the conversation it missed goes to it as one item for you to review. Nothing is replayed.
 async function reconcile() {
   const missed = S.talk.filter(m => m.at > S.reconciledAt && (m.src === 'cloud' || (m.role === 'user' && m.mode !== 'local')));
-  if (missed.length) await outbox.add('reconcile', { messages: missed.map(m => ({ role: m.role, text: m.text, at: m.at, src: m.src || 'you' })) }, `Catch-up for Nexus (${missed.length} messages)`);
+  if (missed.length) await outbox.add('reconcile', { messages: missed.map(m => ({ role: m.role, text: m.text, at: m.at, src: m.src || 'you' })) }, `Cloud conversation for your review on the desktop (${missed.length} messages)`);
   S.reconciledAt = Date.now(); kv.set('reconciledAt', S.reconciledAt);
 }
 
@@ -88,23 +94,23 @@ async function say(text) {
   const m = mode().k, local = conn.state === 'local';
   await addTalk({ role: 'user', text, mode: local ? 'local' : m });
   if (S.desktopTask) {
-    await queue('task', { text }, 'Task for Nexus: ' + clip(text, 40));
-    await addTalk({ role: 'note', text: local ? 'Sent to Nexus as a task.' : 'Queued for Nexus. It runs when your desktop is back.' });
+    await queue('task', { text }, 'Desktop task: ' + clip(text, 40));
+    await addTalk({ role: 'note', text: local ? 'Sent to your desktop. It waits there for your review; nothing runs by itself.' : 'Saved. It goes to your desktop for your review when it is back.' });
     return;
   }
-  if (local) { await queue('chat', { text }, 'Message for Atarah'); return; }
+  if (local) { await queue('chat', { text }, 'Typed message (kept for review)'); return; }
   if (cloudReady()) {
     S.thinking = true; render();
     const secretsNow = { chatgpt: await secrets.get('chatgptToken'), openai: await secrets.get('openaiKey'), anthropic: await secrets.get('anthropicKey') };
     const r = await H.ask({ cfg: S.fb, secrets: secretsNow, usage: S.usage, history: S.talk, extras: extras(), http });
     S.thinking = false; S.usage = r.usage; kv.set('usage', S.usage);
     if (r.ok) { S.lastProvider = r.provider; await addTalk({ role: 'assistant', src: 'cloud', provider: r.provider, model: r.model, text: r.text }); }
-    else await addTalk({ role: 'note', text: r.reason + ' Your message is saved and goes to Atarah when your desktop is back.' });
-    if (!r.ok) await queue('chat', { text }, 'Message for Atarah');
+    else await addTalk({ role: 'note', text: r.reason + ' Your message is saved and goes to your desktop for review when it is back.' });
+    if (!r.ok) await queue('chat', { text }, 'Typed message (kept for review)');
     return;
   }
-  await queue('chat', { text }, 'Message for Atarah');
-  await addTalk({ role: 'note', text: 'Saved. It goes to Atarah when your desktop is back.' });
+  await queue('chat', { text }, 'Typed message (kept for review)');
+  await addTalk({ role: 'note', text: 'Saved. It goes to your desktop for review when it is back.' });
 }
 
 // ---------- voice ----------
@@ -112,7 +118,13 @@ const voice = createVoice({
   request: (p, o) => conn.request(p, o),
   fetchAudio: async p => { try { const r = await fetch(S.link.base.replace(/\/+$/, '') + p, { headers: { Authorization: 'Bearer ' + await secrets.get('deviceToken') } }); return r.ok ? await r.blob() : null; } catch (e) { return null; } },
   onState: s => { S.voice = s; render(); },
-  onReply: r => { if (r.error) addTalk({ role: 'note', text: r.error }); else { if (r.transcript) addTalk({ role: 'user', text: r.transcript, mode: 'local', voice: true }); if (r.reply) addTalk({ role: 'assistant', src: 'nexus', text: r.reply }); } },
+  onReply: r => {
+    if (r.error) return addTalk({ role: 'note', text: r.error });
+    if (r.transcript) addTalk({ role: 'user', text: r.transcript, mode: 'local', voice: true });
+    if (r.reply) addTalk({ role: 'assistant', src: 'nexus', text: r.reply });
+    if (r.note) addTalk({ role: 'note', text: r.note });
+    if (r.reply && r.desktopPlayback && !S.toldPlayback) { S.toldPlayback = true; addTalk({ role: 'note', text: "Atarah spoke this through your desktop's speakers. Nexus can't send her voice to the phone yet, so her words show here." }); }
+  },
 });
 
 // ---------- pairing, alerts ----------
@@ -152,6 +164,10 @@ function mount() {
   sheet.addEventListener('click', onClick); sheet.addEventListener('change', onChange);
   sheet.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'mqInput' && !e.shiftKey) { e.preventDefault(); sendInput(); } if (e.key === 'Escape') close(); });
 }
+let flashT = null;
+function flash(text) { let el = document.getElementById('mqFlash'); if (!el) { el = document.createElement('div'); el.id = 'mqFlash'; el.className = 'mq-flash'; el.setAttribute('role', 'status'); document.body.append(el); } el.textContent = text; el.hidden = false; clearTimeout(flashT); flashT = setTimeout(() => { el.hidden = true; }, 5000); }
+const hhmm = t => t ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'never';
+function nexusLine() { const n = S.nexus; if (!n) return 'Nexus: not known yet.'; if (!n.configured) return "Nexus isn't connected to the bridge yet."; return `Nexus ${n.reachable ? 'is reachable' : 'is not answering'}; phone voice is ${n.voice ? 'on' : 'off'} on your desktop.`; }
 function open(tab) { S.tab = tab || S.tab; sheet.hidden = false; render(); const f = sheet.querySelector('#mqInput'); if (f && !native) f.focus(); }
 function close() { sheet.hidden = true; }
 function sendInput() { const f = sheet.querySelector('#mqInput'); if (!f) return; const v = f.value; f.value = ''; kv.set('draft', ''); say(v); }
@@ -178,29 +194,32 @@ function render() {
 
 function talkHTML() {
   const m = mode().k, local = m === 'local';
-  const note = local ? '' : m === 'cloud' ? '<p class="mq-note">Cloud mode: talk and plan only. Files, tools and Atarah\'s voice need your desktop. Work you send as a desktop task is queued for Nexus.</p>' : `<p class="mq-note">${m === 'offline' ? 'No connection.' : 'Your desktop is not reachable.'} Messages are saved and sent when it is back${S.fb.enabled ? '' : '. Turn on the cloud fallback to keep talking in the meantime'}.</p>`;
+  const voiceOn = local && S.nexus && S.nexus.voice;
+  const note = local ? `<p class="mq-note">${voiceOn ? "Tap MIC to talk to Atarah. She answers on your desktop's speakers and her words appear here." : esc(nexusLine())} Typed messages are kept on your desktop for your review; Atarah only takes voice for now.</p>`
+    : m === 'cloud' ? `<p class="mq-note">Cloud assistant, not Atarah: it can talk and plan, but can't see your desktop, run anything or approve anything. Desktop tasks wait for your review when it's back. Last in touch with your desktop: ${hhmm(S.lastLocalAt)}.</p>`
+    : `<p class="mq-note">${m === 'offline' ? 'No connection.' : 'Your desktop is not reachable.'} Last in touch: ${hhmm(S.lastLocalAt)}. Messages are saved and go to your desktop for review when it is back${S.fb.enabled ? '' : '. Turn on the cloud fallback to keep talking in the meantime'}.</p>`;
   const rows = S.talk.slice(-60).map(x => {
     if (x.role === 'note') return `<div class="mq-msg note">${esc(x.text)}</div>`;
-    const who = x.role === 'user' ? 'YOU' : x.src === 'cloud' ? `ATARAH · CLOUD (${esc(H.PROVIDERS[x.provider] ? H.PROVIDERS[x.provider].label : x.provider)})` : 'ATARAH · NEXUS';
+    const who = x.role === 'user' ? 'YOU' : x.src === 'cloud' ? `CLOUD ASSISTANT · ${esc(H.PROVIDERS[x.provider] ? H.PROVIDERS[x.provider].label : x.provider)}` : 'ATARAH · NEXUS';
     return `<div class="mq-msg ${x.role === 'user' ? 'me' : x.src === 'cloud' ? 'cloud' : 'nexus'}"><b>${who}${x.voice ? ' · VOICE' : ''}</b>${esc(x.text)}</div>`;
-  }).join('') || '<p class="mq-note">Say hello to Atarah. On your desktop link, messages go to Nexus; when the desktop is away, the cloud fallback answers if you have turned it on.</p>';
+  }).join('') || '<p class="mq-note">Talk to Atarah with MIC while your desktop is connected. When it is away, the cloud assistant can help you plan if you have turned it on.</p>';
   const mic = S.voice === 'recording' ? 'STOP' : S.voice === 'thinking' ? '…' : S.voice === 'speaking' ? 'HUSH' : 'MIC';
   return `${note}<div class="mq-talklist">${rows}${S.thinking ? '<div class="mq-msg note">Atarah is thinking…</div>' : ''}</div>
-   <label class="mq-check"><input type="checkbox" data-mq="desktopTask" ${S.desktopTask ? 'checked' : ''}> Run this on my desktop (queued for Nexus if it's away)</label>
+   <label class="mq-check"><input type="checkbox" data-mq="desktopTask" ${S.desktopTask ? 'checked' : ''}> Send as a desktop task (it waits there for your review)</label>
    <div class="mq-compose"><textarea id="mqInput" rows="2" placeholder="Message Atarah" aria-label="Message Atarah"></textarea>
-   <button class="mq-btn" data-mq="mic" ${local ? '' : 'disabled title="Atarah\'s voice runs on your desktop"'} aria-label="Voice">${mic}</button><button class="mq-btn gold" data-mq="send">SEND</button></div>`;
+   <button class="mq-btn" data-mq="mic" ${voiceOn ? '' : 'disabled title="Voice needs your desktop connected with phone voice on"'} aria-label="Voice">${mic}</button><button class="mq-btn gold" data-mq="send">SEND</button></div>`;
 }
 function queueHTML() {
   const items = outbox.items.slice().reverse();
-  if (!items.length) return '<p class="mq-note">Nothing waiting. Commands you make while your desktop is away wait here, and each one runs exactly once when it is back.</p>';
-  return `<div class="mq-list">${items.map(i => `<div class="mq-row"><span class="mq-state ${i.state}">${i.state === 'queued' ? 'WAITING' : i.state === 'sending' ? 'SENDING' : i.state === 'done' ? 'DONE' : 'FAILED'}</span><span class="grow">${esc(i.label)}${i.result && i.result.error ? ` <span class="muted">· ${esc(i.result.error)}</span>` : ''}${i.result && i.result.held ? ' <span class="muted">· held until Nexus is connected</span>' : ''}</span>${i.state === 'failed' ? `<button class="mq-btn" data-mq="retry" data-id="${esc(i.id)}">RETRY</button>` : ''}${i.state === 'queued' ? `<button class="mq-btn" data-mq="drop" data-id="${esc(i.id)}">REMOVE</button>` : ''}</div>`).join('')}</div>
+  if (!items.length) return '<p class="mq-note">Nothing waiting. What you send while your desktop is away waits here and is delivered once when it is back, for your review there. Decisions are never queued.</p>';
+  return `<div class="mq-list">${items.map(i => `<div class="mq-row"><span class="mq-state ${i.state}">${i.state === 'queued' ? 'WAITING' : i.state === 'sending' ? 'SENDING' : i.state === 'unknown' ? 'CHECKING' : i.state === 'done' ? (i.result && i.result.held ? 'ON DESKTOP' : 'DONE') : 'NOT SENT'}</span><span class="grow">${esc(i.label)}${i.result && i.result.error ? ` <span class="muted">· ${esc(i.result.error)}</span>` : ''}${i.result && i.result.held ? ' <span class="muted">· waiting for your review</span>' : ''}</span>${i.state === 'failed' && i.type !== 'decide' ? `<button class="mq-btn" data-mq="retry" data-id="${esc(i.id)}">RETRY</button>` : ''}${i.state === 'queued' ? `<button class="mq-btn" data-mq="drop" data-id="${esc(i.id)}">REMOVE</button>` : ''}</div>`).join('')}</div>
    <button class="mq-btn" data-mq="flush" ${conn.state === 'local' ? '' : 'disabled'}>SEND NOW</button>`;
 }
 function connectHTML() {
   const paired = !!S.link.deviceId, st = conn.state;
   return `<p class="mq-note">Your phone reaches the bridge on your desktop through Tailscale, then proves who it is with its own pairing. Run the bridge, open Atarah's card on the desktop and choose PAIR A PHONE to get a code.</p>
    <label class="mq-field">Desktop address<input id="mqBase" value="${esc(S.link.base)}" placeholder="https://your-pc.your-tailnet.ts.net" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="url"></label>
-   ${paired ? `<dl class="mq-kv"><dt>Paired as</dt><dd>${esc(S.link.name)}</dd><dt>Link</dt><dd>${st === 'local' ? 'Connected' : st === 'offline' ? 'No network' : st === 'unpaired' ? 'This phone was removed on the desktop. Pair again.' : 'Desktop not reachable'}</dd><dt>Nexus</dt><dd>${S.nexus ? (S.nexus.connected ? 'Connected' : 'Not connected yet (' + esc(S.nexus.name) + ')') : '—'}</dd></dl>
+   ${paired ? `<dl class="mq-kv"><dt>Paired as</dt><dd>${esc(S.link.name)}</dd><dt>Link</dt><dd>${st === 'local' ? 'Connected' : st === 'offline' ? 'No network' : st === 'unpaired' ? 'This phone was removed on the desktop. Pair again.' : 'Desktop not reachable'}</dd><dt>Nexus</dt><dd>${esc(nexusLine())}</dd><dt>Last in touch</dt><dd>${hhmm(S.lastLocalAt)}</dd></dl>
      <div class="mq-rowb"><button class="mq-btn" data-mq="saveBase">SAVE ADDRESS</button><button class="mq-btn" data-mq="test">TEST LINK</button><button class="mq-btn" data-mq="unpair">UNPAIR</button></div>`
      : `<label class="mq-field">Pairing code<input id="mqCode" placeholder="ABCD-EFGH" autocapitalize="characters" autocorrect="off" spellcheck="false"></label>
      <label class="mq-field">Name this phone<input id="mqName" value="${esc(S.link.name || 'iPhone')}"></label>
@@ -266,7 +285,7 @@ async function boot() {
   S.link = Object.assign(S.link, await kv.get('link', {}));
   S.fb = Object.assign(H.defaults(), await kv.get('fallback', {}));
   S.usage = await kv.get('usage', null); S.talk = await kv.get('talk', []); S.reconciledAt = await kv.get('reconciledAt', 0);
-  S.draft = await kv.get('draft', ''); S.pushToken = await kv.get('pushToken', null);
+  S.draft = await kv.get('draft', ''); S.pushToken = await kv.get('pushToken', null); S.lastLocalAt = await kv.get('lastLocalAt', 0);
   for (const p of ['openai', 'anthropic']) S['has_' + p] = !!(await secrets.get(p + 'Key'));
   await outbox.load();
   document.documentElement.classList.add('hq-app'); if (native) document.documentElement.classList.add('hq-native');

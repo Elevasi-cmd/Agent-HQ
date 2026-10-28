@@ -73,3 +73,6 @@ html.hq-app #tools::-webkit-scrollbar { display: none; }
 .mq-prov .mq-state { align-self: flex-start; }
 /* in portrait the office page shows a "turn sideways" hint along the bottom; sit above it */
 @media (orientation: portrait) { #mq { bottom: calc(96px + env(safe-area-inset-bottom)); } }
+.mq-flash { position: fixed; left: 50%; transform: translateX(-50%); top: calc(64px + env(safe-area-inset-top)); z-index: 80; max-width: min(92vw, 520px); background: #3A1418; color: #F4EEDC; border: 2px solid #E36B6B; box-shadow: 2px 2px 0 #05060C; padding: 10px 12px; font-family: var(--f-body); font-size: 18px; }
+.mq-flash[hidden] { display: none; }
+.mq-state.unknown { background: #C9A24E; }

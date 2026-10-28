@@ -44,7 +44,8 @@ export function checkLimits(cfg, usage, now = new Date()) {
   return { ok: true, usage: u };
 }
 
-export const SYSTEM = "You are Atarah, the user's assistant, running in cloud fallback mode on their phone because their desktop (Nexus) can't be reached. You can talk, plan and draft. You cannot run tools, read or change files, use the desktop, or approve anything. When the user asks for something that needs the desktop, say so plainly and offer to queue it for Nexus. Keep replies short.";
+// Not labelled as Atarah: her identity and voice live on the desktop, and continuity across providers isn't agreed yet.
+export const SYSTEM = "You are a cloud assistant on the user's phone, standing in while their desktop assistant, Atarah (part of their Nexus system), can't be reached. You are not Atarah and must not say you are. You can talk, plan and draft. You cannot run tools, read or change files, use the desktop, see live status or approve anything, so never present anything as current desktop state. When the user wants something done on the desktop, say so plainly and suggest sending it as a desktop task; it will wait for their review there. Keep replies short.";
 
 export function buildContext(cfg, history, extras = {}) {
   let system = SYSTEM;
