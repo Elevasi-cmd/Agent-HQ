@@ -1,0 +1,62 @@
+# Agent HQ for iPhone: built, signed and sent to TestFlight on Codemagic's Macs. No local Mac or Xcode needed.
+# One-time setup: README.md, "First TestFlight build". Secrets live only in Codemagic (never in this repository):
+#   - App Store Connect API key  -> Codemagic Team settings > Integrations > Developer Portal (named below)
+#   - CERTIFICATE_PRIVATE_KEY    -> Codemagic environment variable group "code_signing", marked Secret
+# Set APP_STORE_APPLE_ID below to your app's Apple ID (App Store Connect > your app > App Information), then start a
+# build from Codemagic or push to main.
+workflows:
+  ios-testflight:
+    name: Agent HQ · iOS · TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 45
+    integrations:
+      app_store_connect: Agent HQ ASC        # exactly the name you give the API key in Codemagic
+    environment:
+      groups:
+        - code_signing                         # CERTIFICATE_PRIVATE_KEY (secret)
+      vars:
+        BUNDLE_ID: "com.atarah.agenthq"        # must match the App ID you register and the App Store Connect app
+        APP_STORE_APPLE_ID: "0000000000"       # replace with your app's Apple ID number; the build stops until you do
+        PUSH_ENABLED: "false"                  # "true" only after Push Notifications is ticked on the App ID
+      node: v22.11.0
+      xcode: latest
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+      cancel_previous_builds: true
+    scripts:
+      - name: Install
+        script: npm ci
+      - name: Test the phone layer
+        script: npm test
+      - name: Build the web layer, apply iOS settings, sync Capacitor
+        script: |
+          npm run build
+          node scripts/ios-config.js
+          npx cap sync ios
+      - name: Preflight (fails fast with a plain message before any signing)
+        script: node scripts/check-ios.js
+      - name: Signing (distribution certificate and App Store profile are created if missing)
+        script: |
+          keychain initialize
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create
+          keychain add-certificates
+          xcode-project use-profiles --custom-export-options='{"testFlightInternalTestingOnly": true}'
+      - name: Build number (one higher than the latest TestFlight build)
+        script: |
+          LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" 2>/dev/null || echo 0)
+          case "$LATEST" in ''|*[!0-9]*) LATEST=0 ;; esac
+          cd ios/App && agvtool new-version -all $((LATEST + 1))
+      - name: Build the app
+        script: xcode-project build-ipa --project "ios/App/App.xcodeproj" --scheme "App"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        # Internal testing only: available to you as soon as Apple finishes processing, no beta review.
+        submit_to_testflight: false
