@@ -1,4 +1,7 @@
 // Link to the desktop bridge: health checks, a resumable event stream and authenticated posts.
+// Catch-up: the phone remembers the bridge's event stream id and the last event number it handled. The bridge keeps
+// numbering across its own restarts; if it can't replay from there (new stream, gap, or the phone is ahead of it),
+// its hello says resync and the office rebuilds from what is really waiting, never from guesses.
 // States: 'unpaired' | 'connecting' | 'local' (desktop reachable) | 'unreachable' (paired, desktop away) | 'offline' (no network)
 
 export function parseSSE(buf, onMsg) {
@@ -13,7 +16,7 @@ export function parseSSE(buf, onMsg) {
 }
 
 export function createConn({ getBase, getToken, onEvent, onState, fetchImpl = (...a) => fetch(...a), loadSeq = async () => 0, saveSeq = async () => {} }) {
-  let state = 'connecting', ctrl = null, timer = null, backoff = 2000, online = true, lastSeq = 0, seqLoaded = false, stopped = false;
+  let state = 'connecting', ctrl = null, timer = null, backoff = 2000, online = true, lastSeq = 0, stream = null, seqLoaded = false, stopped = false;
   const set = s => { if (s !== state) { state = s; onState(s); } };
   const url = p => getBase().replace(/\/+$/, '') + p;
   async function headers() { const t = await getToken(); return t ? { Authorization: 'Bearer ' + t } : {}; }
@@ -38,12 +41,12 @@ export function createConn({ getBase, getToken, onEvent, onState, fetchImpl = (.
     if (stopped) return;
     if (!getBase() || !(await getToken())) { set('unpaired'); return; }
     if (!online) { set('offline'); return; }
-    if (!seqLoaded) { lastSeq = +(await loadSeq()) || 0; seqLoaded = true; }
+    if (!seqLoaded) { const c = await loadSeq(); if (c && typeof c === 'object') { lastSeq = +c.seq || 0; stream = c.stream || null; } else lastSeq = +c || 0; seqLoaded = true; }
     if (ctrl) ctrl.abort();
     ctrl = new AbortController(); const my = ctrl;
     if (state !== 'local') set('connecting');
     try {
-      const r = await fetchImpl(url('/m/events?since=' + lastSeq), { headers: await headers(), signal: my.signal });
+      const r = await fetchImpl(url('/m/events?since=' + lastSeq + (stream ? '&stream=' + encodeURIComponent(stream) : '')), { headers: await headers(), signal: my.signal });
       if (r.status === 401) { set('unpaired'); return; }
       if (!r.ok || !r.body) throw new Error('status ' + r.status);
       set('local'); backoff = 2000;
@@ -51,8 +54,8 @@ export function createConn({ getBase, getToken, onEvent, onState, fetchImpl = (.
       for (;;) {
         const { value, done } = await reader.read(); if (done) break;
         buf = parseSSE(buf + dec.decode(value, { stream: true }), (msg, id) => {
-          if (id != null) { if (id <= lastSeq) return; lastSeq = id; saveSeq(id); }
-          if (msg.type === 'resync') { lastSeq = 0; saveSeq(0); }
+          if (msg.type === 'hello' && typeof msg.stream === 'string') { stream = msg.stream; lastSeq = Math.max(0, +msg.from || 0); saveSeq({ stream, seq: lastSeq }); }
+          if (id != null) { if (id <= lastSeq) return; lastSeq = id; saveSeq({ stream, seq: id }); }
           onEvent(msg);
         });
       }
@@ -67,11 +70,12 @@ export function createConn({ getBase, getToken, onEvent, onState, fetchImpl = (.
   return {
     get state() { return state; },
     get lastSeq() { return lastSeq; },
+    get stream() { return stream; },
     connect,
     request,
     pause() { stopped = true; clearTimeout(timer); if (ctrl) ctrl.abort(); },
     resume() { stopped = false; backoff = 2000; connect(); },
     setOnline(v) { online = v; if (v) { backoff = 2000; connect(); } else { if (ctrl) ctrl.abort(); set('offline'); } },
-    reset() { lastSeq = 0; saveSeq(0); if (ctrl) ctrl.abort(); connect(); },
+    reset() { lastSeq = 0; stream = null; saveSeq({ stream: null, seq: 0 }); if (ctrl) ctrl.abort(); connect(); },
   };
 }

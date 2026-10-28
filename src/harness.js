@@ -2,8 +2,12 @@
 // It covers conversation and planning only: no files, no tools, no approvals and no Atarah voice engine.
 // Anything that needs the desktop is queued for Nexus by the app, not done here.
 
+// ChatGPT (your plan) is a different thing from an OpenAI API key. Its sign-in is OpenAI's own OAuth (PKCE) flow, it is
+// open only to selected partners and private clients, and its requests follow their own rules. So it has no request
+// code here: it stays unavailable until a separate, verified integration is supplied (see `integrations` below). A
+// ChatGPT sign-in token is never sent through the API-key path, and no field in the app accepts one.
 export const PROVIDERS = {
-  chatgpt: { label: 'ChatGPT (your plan)', paid: false, note: 'Sign in with ChatGPT. Stays off until OpenAI confirms this app can use your plan.' },
+  chatgpt: { label: 'ChatGPT (your plan)', paid: false, subscription: true, note: "Sign in with ChatGPT. Off until OpenAI gives this app access and its sign-in has been checked on iPhone. It is not an API key and won't be used as one." },
   openai: { label: 'OpenAI API', paid: true, note: 'Your own OpenAI API key. Billed by OpenAI, separately from ChatGPT.' },
   anthropic: { label: 'Anthropic API', paid: true, note: 'Your own Anthropic API key. Billed by Anthropic.' },
 };
@@ -14,7 +18,6 @@ export function defaults() {
     order: ['chatgpt', 'openai', 'anthropic'],
     paidApproved: false,                  // paid API providers stay off until you approve them
     models: { chatgpt: '', openai: '', anthropic: '' },
-    chatgpt: { access: false, endpoint: 'https://api.openai.com/v1/responses' },
     context: { conversation: true, waiting: false, tasks: false },
     limits: { requests: 40, tokens: 60000 },  // per day
   };
@@ -22,11 +25,12 @@ export function defaults() {
 
 export const today = (d = new Date()) => d.toISOString().slice(0, 10);
 
-export function usable(cfg, secrets) {
+// integrations: { chatgpt?: { verified: true, ask(ctx, model) -> Promise<{ text, tokens }> } }. None exists yet.
+export function usable(cfg, secrets, integrations = {}) {
   const list = [], why = {};
   for (const p of cfg.order) {
     if (!PROVIDERS[p]) continue;
-    if (p === 'chatgpt') { if (!cfg.chatgpt.access || !secrets.chatgpt) { why[p] = 'waiting for confirmed access'; continue; } }
+    if (p === 'chatgpt') { const i = integrations.chatgpt; if (!i || i.verified !== true || typeof i.ask !== 'function') { why[p] = 'no supported sign-in for this app yet'; continue; } }
     else {
       if (!secrets[p]) { why[p] = 'no key saved'; continue; }
       if (!cfg.paidApproved) { why[p] = 'paid fallback not approved'; continue; }
@@ -57,15 +61,16 @@ export function buildContext(cfg, history, extras = {}) {
   return { system, messages };
 }
 
+// API-key providers only.
 export function request(provider, cfg, secret, ctx) {
+  if (provider !== 'openai' && provider !== 'anthropic') throw new Error('No API-key request for ' + provider);
   if (provider === 'anthropic') return {
     url: 'https://api.anthropic.com/v1/messages',
     headers: { 'x-api-key': secret, 'anthropic-version': '2023-06-01', 'content-type': 'application/json', 'anthropic-dangerous-direct-browser-access': 'true' },
     body: { model: cfg.models.anthropic, max_tokens: 800, system: ctx.system, messages: ctx.messages },
   };
-  // OpenAI API and ChatGPT plan both use the Responses API; the plan sends the user's sign-in token instead of an API key.
   return {
-    url: provider === 'chatgpt' ? cfg.chatgpt.endpoint : 'https://api.openai.com/v1/responses',
+    url: 'https://api.openai.com/v1/responses',
     headers: { authorization: 'Bearer ' + secret, 'content-type': 'application/json' },
     body: { model: cfg.models[provider], instructions: ctx.system, input: ctx.messages, max_output_tokens: 800, store: false },
   };
@@ -83,17 +88,21 @@ export function parse(provider, j) {
 }
 
 // http(url, { method, headers, body }) -> Promise<{ status, json }>
-export async function ask({ cfg, secrets, usage, history, extras, http, now }) {
+export async function ask({ cfg, secrets, usage, history, extras, http, now, integrations = {} }) {
   const lim = checkLimits(cfg, usage, now);
   if (!cfg.enabled) return { ok: false, reason: 'Cloud fallback is switched off.', usage: lim.usage };
   if (!lim.ok) return { ok: false, reason: lim.reason, usage: lim.usage };
-  const { list, why } = usable(cfg, secrets);
+  const { list, why } = usable(cfg, secrets, integrations);
   if (!list.length) return { ok: false, reason: 'No cloud provider is ready: ' + Object.entries(why).map(([p, w]) => `${PROVIDERS[p].label} (${w})`).join(', ') + '.', usage: lim.usage };
   const ctx = buildContext(cfg, history, extras);
   let last = '', u = lim.usage;
   for (const p of list) {
-    const r = request(p, cfg, secrets[p], ctx);
     u = { ...u, requests: u.requests + 1 };
+    if (p === 'chatgpt') {
+      try { const o = await integrations.chatgpt.ask(ctx, cfg.models.chatgpt); return { ok: true, provider: p, model: cfg.models[p], text: o.text || '(the reply had no text)', usage: { ...u, tokens: u.tokens + (o.tokens || 0) } }; }
+      catch (e) { last = `${PROVIDERS[p].label}: ${e.message}`; continue; }
+    }
+    const r = request(p, cfg, secrets[p], ctx);
     try {
       const res = await http(r.url, { method: 'POST', headers: r.headers, body: JSON.stringify(r.body) });
       if (res.status >= 200 && res.status < 300) {

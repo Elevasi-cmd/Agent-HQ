@@ -7,3 +7,5 @@ ios/App/build/
 ios/DerivedData/
 *.ipa
 .DS_Store
+e2e/out/
+bridge/.agent-hq/

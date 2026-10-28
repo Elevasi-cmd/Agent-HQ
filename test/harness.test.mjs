@@ -9,11 +9,17 @@ test('fallback is off by default and paid providers need approval', async () => 
   const r = await H.ask({ cfg: cfgWith({ models: { openai: 'm', anthropic: '', chatgpt: '' } }), secrets: { openai: 'sk' }, usage: null, history: hist, http: async () => { throw new Error('must not call'); } });
   assert.equal(r.ok, false); assert.match(r.reason, /paid fallback not approved/);
 });
-test('ChatGPT plan stays unavailable until access is confirmed', () => {
-  const u = H.usable(cfgWith({ models: { chatgpt: 'x', openai: '', anthropic: '' } }), { chatgpt: 'tok' });
-  assert.deepEqual(u.list, []); assert.match(u.why.chatgpt, /confirmed access/);
-  const ok = H.usable(cfgWith({ chatgpt: { access: true, endpoint: 'https://e' }, models: { chatgpt: 'x', openai: '', anthropic: '' } }), { chatgpt: 'tok' });
-  assert.deepEqual(ok.list, ['chatgpt']);
+test('ChatGPT plan is never usable without a verified integration, and its token is never sent as an API key', async () => {
+  const cfg = cfgWith({ paidApproved: true, models: { chatgpt: 'x', openai: '', anthropic: '' } });
+  const u = H.usable(cfg, { chatgpt: 'tok' }); assert.deepEqual(u.list, []); assert.match(u.why.chatgpt, /no supported sign-in/);
+  assert.deepEqual(H.usable(cfg, {}, { chatgpt: { verified: false, ask: async () => ({}) } }).list, []);
+  assert.throws(() => H.request('chatgpt', cfg, 'tok', { system: '', messages: [] }), /No API-key request/);
+  const r = await H.ask({ cfg, secrets: { chatgpt: 'tok' }, usage: null, history: hist, http: async () => { throw new Error('must not call'); } });
+  assert.equal(r.ok, false); assert.match(r.reason, /ChatGPT \(your plan\) \(no supported sign-in/);
+  assert.equal('chatgpt' in H.defaults(), false, 'no ChatGPT endpoint or access switch in settings');
+  // a verified integration (none exists yet) would be called through its own interface, not the API-key path
+  const ok = await H.ask({ cfg, secrets: {}, usage: null, history: hist, http: async () => { throw new Error('must not call'); }, integrations: { chatgpt: { verified: true, ask: async () => ({ text: 'plan reply', tokens: 3 }) } } });
+  assert.equal(ok.ok, true); assert.equal(ok.provider, 'chatgpt'); assert.equal(ok.text, 'plan reply');
 });
 test('OpenAI request uses the Responses API and is parsed', async () => {
   const calls = []; const cfg = cfgWith({ paidApproved: true, models: { openai: 'my-model', anthropic: '', chatgpt: '' } });

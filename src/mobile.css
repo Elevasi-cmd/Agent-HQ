@@ -76,3 +76,5 @@ html.hq-app #tools::-webkit-scrollbar { display: none; }
 .mq-flash { position: fixed; left: 50%; transform: translateX(-50%); top: calc(64px + env(safe-area-inset-top)); z-index: 80; max-width: min(92vw, 520px); background: #3A1418; color: #F4EEDC; border: 2px solid #E36B6B; box-shadow: 2px 2px 0 #05060C; padding: 10px 12px; font-family: var(--f-body); font-size: 18px; }
 .mq-flash[hidden] { display: none; }
 .mq-state.unknown { background: #C9A24E; }
+
+.mq-missing{margin:4px 0 8px 18px;padding:0;font-size:15px;color:#B9B2A0}.mq-missing li{margin:2px 0}.mq-state.uncertain{background:#F08A3C}.mq-state.unknown{background:#9FB7E8}

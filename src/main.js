@@ -1,5 +1,5 @@
-// Agent HQ for iPhone. Wraps the office page with: the desktop link (Tailscale + device pairing), a queue that never
-// runs a command twice, Atarah's talk panel (text and voice), a cloud fallback that runs on the phone, and alerts.
+// Agent HQ for iPhone. Wraps the office page with: the desktop link (Tailscale + device pairing), a queue whose
+// resends are answered by the bridge's record instead of being run again (and which says so when it can't be sure), Atarah's talk panel (text and voice), a cloud fallback that runs on the phone, and alerts.
 import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import { App } from '@capacitor/app';
 import { Network } from '@capacitor/network';
@@ -45,6 +45,7 @@ const outbox = createOutbox({ load: () => kv.get('outbox', []), save: v => kv.se
 async function sendCmd(it) {
   const r = await conn.request('/m/command', { method: 'POST', body: Object.assign({ id: it.id, type: it.type }, it.payload) });
   if (r.status === 200) return r.json;
+  if (r.status === 409 && r.json && r.json.inProgress) return { inProgress: true };
   if (r.status === 401 || r.status >= 500) throw new Error('not now');
   return { ok: false, error: (r.json && r.json.error) || 'status ' + r.status };
 }
@@ -55,6 +56,7 @@ let prevState = null;
 async function onLinkState(s) {
   if (s === 'local' && prevState !== 'local') {
     S.lastLocalAt = Date.now(); kv.set('lastLocalAt', S.lastLocalAt);
+    if (S.connMsg === 'Paired. Connecting…') S.connMsg = 'Paired and connected.';
     await outbox.resolveUnknown(async it => { const r = await conn.request('/m/command/' + encodeURIComponent(it.id)); if (r.status !== 200) throw new Error('not now'); return r.json; });
     await reconcile(); await flush();
     if (S.pushToken) conn.request('/m/push-token', { method: 'POST', body: { token: S.pushToken } }).catch(() => {});
@@ -101,7 +103,7 @@ async function say(text) {
   if (local) { await queue('chat', { text }, 'Typed message (kept for review)'); return; }
   if (cloudReady()) {
     S.thinking = true; render();
-    const secretsNow = { chatgpt: await secrets.get('chatgptToken'), openai: await secrets.get('openaiKey'), anthropic: await secrets.get('anthropicKey') };
+    const secretsNow = { openai: await secrets.get('openaiKey'), anthropic: await secrets.get('anthropicKey') }; // API keys only; never a ChatGPT sign-in
     const r = await H.ask({ cfg: S.fb, secrets: secretsNow, usage: S.usage, history: S.talk, extras: extras(), http });
     S.thinking = false; S.usage = r.usage; kv.set('usage', S.usage);
     if (r.ok) { S.lastProvider = r.provider; await addTalk({ role: 'assistant', src: 'cloud', provider: r.provider, model: r.model, text: r.text }); }
@@ -168,6 +170,7 @@ let flashT = null;
 function flash(text) { let el = document.getElementById('mqFlash'); if (!el) { el = document.createElement('div'); el.id = 'mqFlash'; el.className = 'mq-flash'; el.setAttribute('role', 'status'); document.body.append(el); } el.textContent = text; el.hidden = false; clearTimeout(flashT); flashT = setTimeout(() => { el.hidden = true; }, 5000); }
 const hhmm = t => t ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'never';
 function nexusLine() { const n = S.nexus; if (!n) return 'Nexus: not known yet.'; if (!n.configured) return "Nexus isn't connected to the bridge yet."; return `Nexus ${n.reachable ? 'is reachable' : 'is not answering'}; phone voice is ${n.voice ? 'on' : 'off'} on your desktop.`; }
+function missingHTML() { const m = S.nexus && S.nexus.missing; return m && m.length ? `<h4>NOT AVAILABLE FROM NEXUS YET</h4><ul class="mq-missing">${m.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''; }
 function open(tab) { S.tab = tab || S.tab; sheet.hidden = false; render(); const f = sheet.querySelector('#mqInput'); if (f && !native) f.focus(); }
 function close() { sheet.hidden = true; }
 function sendInput() { const f = sheet.querySelector('#mqInput'); if (!f) return; const v = f.value; f.value = ''; kv.set('draft', ''); say(v); }
@@ -209,10 +212,11 @@ function talkHTML() {
    <div class="mq-compose"><textarea id="mqInput" rows="2" placeholder="Message Atarah" aria-label="Message Atarah"></textarea>
    <button class="mq-btn" data-mq="mic" ${voiceOn ? '' : 'disabled title="Voice needs your desktop connected with phone voice on"'} aria-label="Voice">${mic}</button><button class="mq-btn gold" data-mq="send">SEND</button></div>`;
 }
+const STATE = { queued: 'WAITING', sending: 'SENDING', unknown: 'CHECKING', uncertain: 'CHECK DESKTOP', failed: 'NOT SENT' };
 function queueHTML() {
   const items = outbox.items.slice().reverse();
-  if (!items.length) return '<p class="mq-note">Nothing waiting. What you send while your desktop is away waits here and is delivered once when it is back, for your review there. Decisions are never queued.</p>';
-  return `<div class="mq-list">${items.map(i => `<div class="mq-row"><span class="mq-state ${i.state}">${i.state === 'queued' ? 'WAITING' : i.state === 'sending' ? 'SENDING' : i.state === 'unknown' ? 'CHECKING' : i.state === 'done' ? (i.result && i.result.held ? 'ON DESKTOP' : 'DONE') : 'NOT SENT'}</span><span class="grow">${esc(i.label)}${i.result && i.result.error ? ` <span class="muted">· ${esc(i.result.error)}</span>` : ''}${i.result && i.result.held ? ' <span class="muted">· waiting for your review</span>' : ''}</span>${i.state === 'failed' && i.type !== 'decide' ? `<button class="mq-btn" data-mq="retry" data-id="${esc(i.id)}">RETRY</button>` : ''}${i.state === 'queued' ? `<button class="mq-btn" data-mq="drop" data-id="${esc(i.id)}">REMOVE</button>` : ''}</div>`).join('')}</div>
+  if (!items.length) return '<p class="mq-note">Nothing waiting. What you send while your desktop is away waits here and goes when it is back, for your review there. If an answer is lost, the app asks the desktop what happened instead of sending it again. Decisions are never queued.</p>';
+  return `<div class="mq-list">${items.map(i => `<div class="mq-row"><span class="mq-state ${i.state}">${i.state === 'done' ? (i.result && i.result.held ? 'ON DESKTOP' : 'DONE') : STATE[i.state] || 'NOT SENT'}</span><span class="grow">${esc(i.label)}${i.result && i.result.error ? ` <span class="muted">· ${esc(i.result.error)}</span>` : ''}${i.result && i.result.held ? ' <span class="muted">· waiting for your review</span>' : ''}</span>${(i.state === 'failed' || i.state === 'uncertain') && !i.noResend && i.type !== 'decide' ? `<button class="mq-btn" data-mq="resend" data-id="${esc(i.id)}" data-u="${i.state === 'uncertain' ? 1 : ''}">SEND AGAIN</button>` : ''}${i.state === 'queued' ? `<button class="mq-btn" data-mq="drop" data-id="${esc(i.id)}">REMOVE</button>` : ''}</div>`).join('')}</div>
    <button class="mq-btn" data-mq="flush" ${conn.state === 'local' ? '' : 'disabled'}>SEND NOW</button>`;
 }
 function connectHTML() {
@@ -224,6 +228,7 @@ function connectHTML() {
      : `<label class="mq-field">Pairing code<input id="mqCode" placeholder="ABCD-EFGH" autocapitalize="characters" autocorrect="off" spellcheck="false"></label>
      <label class="mq-field">Name this phone<input id="mqName" value="${esc(S.link.name || 'iPhone')}"></label>
      <button class="mq-btn gold" data-mq="pair">PAIR</button>`}
+   ${missingHTML()}
    <h4>ALERTS</h4><p class="mq-note">${S.pushToken ? 'Alerts are on. Your desktop tells this phone when something needs your decision.' : 'Get an alert when Claude Code or Nexus needs your decision while the app is closed.'}${S.alertError ? ' (' + esc(S.alertError) + ')' : ''}</p>
    ${S.pushToken ? '' : '<button class="mq-btn" data-mq="alerts">TURN ON ALERTS</button>'}
    <p class="mq-msg note" id="mqConnMsg" ${S.connMsg ? '' : 'hidden'}>${esc(S.connMsg || '')}</p>`;
@@ -232,7 +237,7 @@ function fallbackHTML() {
   const f = S.fb, u = H.checkLimits(f, S.usage).usage;
   const prov = p => {
     const P = H.PROVIDERS[p];
-    if (p === 'chatgpt') return `<div class="mq-prov"><b>${P.label}</b><span class="mq-state ${f.chatgpt.access ? 'done' : 'queued'}">${f.chatgpt.access ? 'READY' : 'NOT YET'}</span><p class="mq-note">${P.note} Sign-in will appear here once access is confirmed; nothing is sent to OpenAI until then.</p></div>`;
+    if (p === 'chatgpt') return `<div class="mq-prov"><b>${P.label}</b><span class="mq-state queued">NOT AVAILABLE YET</span><p class="mq-note">${P.note} Nothing is sent to OpenAI from here until then.</p></div>`;
     return `<div class="mq-prov"><b>${P.label}</b><span class="mq-state ${S['has_' + p] ? 'done' : 'queued'}">${S['has_' + p] ? 'KEY SAVED' : 'NO KEY'}</span><p class="mq-note">${P.note}</p>
      <label class="mq-field">API key<input type="password" id="mqKey_${p}" placeholder="${S['has_' + p] ? 'saved in the Keychain' : 'paste key'}" autocomplete="off"></label>
      <label class="mq-field">Model<input id="mqModel_${p}" value="${esc(f.models[p])}" placeholder="model name" autocapitalize="off" autocorrect="off"></label>
@@ -257,7 +262,7 @@ async function onClick(e) {
   if (a === 'tab') { S.tab = b.dataset.k; return render(); }
   if (a === 'send') return sendInput();
   if (a === 'mic') { try { if (S.voice === 'recording') await voice.finish(); else if (S.voice === 'speaking') { voice.stopPlayback(); S.voice = 'idle'; render(); } else if (S.voice === 'idle') await voice.start(); } catch (err) { addTalk({ role: 'note', text: err.message }); } return; }
-  if (a === 'retry') { await outbox.retry(b.dataset.id); return flush(); }
+  if (a === 'resend') { if (b.dataset.u && !confirm('This may already have reached your desktop. Check there first. Send it again anyway?')) return; await outbox.resend(b.dataset.id); return flush(); }
   if (a === 'drop') { await outbox.remove(b.dataset.id); return render(); }
   if (a === 'flush') return flush();
   if (a === 'pair') { const base = sheet.querySelector('#mqBase').value, code = sheet.querySelector('#mqCode').value, name = sheet.querySelector('#mqName').value; S.connMsg = 'Pairing…'; render(); const err = await pair(base, code, name); if (err) S.link.base = base.trim(); S.connMsg = err || 'Paired. Connecting…'; return render(); }
@@ -283,7 +288,8 @@ async function onChange(e) {
 // ---------- start ----------
 async function boot() {
   S.link = Object.assign(S.link, await kv.get('link', {}));
-  S.fb = Object.assign(H.defaults(), await kv.get('fallback', {}));
+  S.fb = Object.assign(H.defaults(), await kv.get('fallback', {})); delete S.fb.chatgpt; // older builds stored an access switch
+  secrets.set('chatgptToken', null).catch(() => {});
   S.usage = await kv.get('usage', null); S.talk = await kv.get('talk', []); S.reconciledAt = await kv.get('reconciledAt', 0);
   S.draft = await kv.get('draft', ''); S.pushToken = await kv.get('pushToken', null); S.lastLocalAt = await kv.get('lastLocalAt', 0);
   for (const p of ['openai', 'anthropic']) S['has_' + p] = !!(await secrets.get(p + 'Key'));

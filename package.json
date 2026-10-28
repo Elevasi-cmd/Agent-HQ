@@ -6,7 +6,12 @@
   "scripts": {
     "build": "node scripts/build-www.js",
     "sync": "npm run build && npx cap sync ios",
-    "test": "node --test \"test/*.test.mjs\""
+    "test": "node --test \"test/*.test.mjs\"",
+    "check": "node scripts/check-ios.js",
+    "ios": "npm run build && node scripts/ios-config.js && npx cap sync ios && node scripts/check-ios.js",
+    "office": "node scripts/build-office.js",
+    "test:bridge": "node --test \"bridge/test/*.test.js\"",
+    "e2e": "node e2e/phone.e2e.js www bridge e2e/out"
   },
   "dependencies": {
     "@aparajita/capacitor-secure-storage": "8.0.1",
