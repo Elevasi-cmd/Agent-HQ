@@ -16,7 +16,7 @@ workflows:
         - code_signing                         # CERTIFICATE_PRIVATE_KEY (secret)
       vars:
         BUNDLE_ID: "com.atarah.agenthq"        # must match the App ID you register and the App Store Connect app
-        APP_STORE_APPLE_ID: "0000000000"       # replace with your app's Apple ID number; the build stops until you do
+        APP_STORE_APPLE_ID: "6828269595"       # Agent HQ in App Store Connect (App Information > Apple ID)
         PUSH_ENABLED: "false"                  # "true" only after Push Notifications is ticked on the App ID
       node: v22.11.0
       xcode: latest
