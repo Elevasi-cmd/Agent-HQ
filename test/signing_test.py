@@ -4,6 +4,8 @@ import hashlib
 import importlib.util
 from pathlib import Path
 import unittest
+import tempfile
+import stat
 
 spec = importlib.util.spec_from_file_location('signing', Path(__file__).resolve().parents[1] / 'scripts/prepare-ios-signing.py')
 signing = importlib.util.module_from_spec(spec)
@@ -61,6 +63,38 @@ class SigningTests(unittest.TestCase):
 
     def test_certificate_fingerprint_identity(self):
         signing.verify_settings({**self.s, 'CODE_SIGN_IDENTITY': next(iter(self.ids))}, self.p, self.bundle)
+
+
+    def test_install_profile_in_xcode_directories_by_uuid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / 'home'
+            source = Path(tmp) / 'download.mobileprovision'
+            source.write_bytes(b'synthetic signed profile bytes')
+            paths = signing.install_profile(source, 'fixture-uuid', home)
+            self.assertEqual(paths, [
+                home / 'Library/Developer/Xcode/UserData/Provisioning Profiles/fixture-uuid.mobileprovision',
+                home / 'Library/MobileDevice/Provisioning Profiles/fixture-uuid.mobileprovision',
+            ])
+            for path in paths:
+                self.assertEqual(path.read_bytes(), source.read_bytes())
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            # Reinstalling an updated download must replace its installed bytes.
+            source.write_bytes(b'updated fixture')
+            signing.install_profile(source, 'fixture-uuid', home)
+            self.assertTrue(all(p.read_bytes() == source.read_bytes() for p in paths))
+
+    def test_profile_install_rejects_path_traversal(self):
+        with self.assertRaises(ValueError):
+            signing.install_profile('unused', '../../outside')
+
+    def test_installation_failure_stops_signing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'source'
+            source.write_bytes(b'fixture')
+            home = Path(tmp) / 'not-a-directory'
+            home.write_text('blocked')
+            with self.assertRaises(OSError):
+                signing.install_profile(source, 'fixture-uuid', home)
 
 
 if __name__ == '__main__':

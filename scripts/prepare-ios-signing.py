@@ -61,6 +61,30 @@ def verify_settings(s, p, bundle):
         raise ValueError('; '.join(issues))
 
 
+def install_profile(source, uuid, home=None):
+    """Install by UUID where modern and older Xcode versions discover profiles."""
+    if not re.fullmatch(r'[A-Za-z0-9-]+', uuid):
+        raise ValueError('Invalid provisioning profile UUID')
+    home = Path.home() if home is None else Path(home)
+    locations = [
+        home / 'Library/Developer/Xcode/UserData/Provisioning Profiles',
+        home / 'Library/MobileDevice/Provisioning Profiles',
+    ]
+    data = Path(source).read_bytes()
+    installed = []
+    for directory in locations:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = directory / (uuid + '.mobileprovision')
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'wb') as out:
+            out.write(data)
+        os.chmod(target, 0o600)
+        if target.read_bytes() != data:
+            raise ValueError('Installed provisioning profile does not match selected profile')
+        installed.append(target)
+    return installed
+
+
 def main():
     bundle = os.environ.get('BUNDLE_ID', '')
     if not bundle:
@@ -88,6 +112,9 @@ def main():
     if len({tuple(p['TeamIdentifier']) for p, _ in candidates}) > 1:
         raise ValueError('Multiple Apple teams match. Set APPLE_TEAM_ID to the intended team.')
     profile, path = max(candidates, key=lambda pair: pair[0]['ExpirationDate'])
+    installed = install_profile(path, profile['UUID'])
+    path = installed[0]
+    print('Installed selected profile in Xcode provisioning-profile directories.')
     subprocess.run(['xcode-project', 'use-profiles', '--project', PROJECT, '--profile', str(path),
                     '--archive-method', 'app-store', '--code-signing-setup-verbose-logging',
                     '--custom-export-options', '{"testFlightInternalTestingOnly": true}'], cwd=ROOT, check=True)
@@ -99,6 +126,7 @@ def main():
     verify_settings(targets[0], profile, bundle)
     summary = {k: targets[0].get(k, '') for k in ('PRODUCT_BUNDLE_IDENTIFIER', 'DEVELOPMENT_TEAM',
                'CODE_SIGN_STYLE', 'CODE_SIGN_IDENTITY', 'PROVISIONING_PROFILE_SPECIFIER')}
+    summary['installedProfilePaths'] = [str(p) for p in installed]
     summary['profileExpires'] = profile['ExpirationDate'].isoformat()
     out = ROOT / 'build/signing-summary.json'
     out.parent.mkdir(exist_ok=True)
@@ -109,7 +137,7 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (ValueError, subprocess.CalledProcessError) as exc:
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         if isinstance(exc, subprocess.CalledProcessError):
             print((exc.stderr or b'').decode(errors='replace')[-5000:], file=sys.stderr)
             message = 'Signing tool failed; inspect preceding signing output.'
