@@ -26,7 +26,10 @@ workflows:
       - name: Install
         script: npm ci
       - name: Test the phone layer
-        script: npm test
+        script: |
+          set -euo pipefail
+          npm test
+          python3 -m unittest discover -s test -p 'signing_test.py'
       - name: Build the web layer, apply iOS settings, sync Capacitor
         script: |
           npm run build
@@ -36,19 +39,22 @@ workflows:
         script: node scripts/check-ios.js
       - name: Signing (distribution certificate and App Store profile are created if missing)
         script: |
+          set -euo pipefail
           keychain initialize
-          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create
+          mkdir -p .codemagic-signing/profiles
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --strict-match-identifier --profiles-dir .codemagic-signing/profiles --create
           keychain add-certificates
-          xcode-project use-profiles --custom-export-options='{"testFlightInternalTestingOnly": true}'
+          python3 scripts/prepare-ios-signing.py
       - name: Build number (one higher than the latest TestFlight build)
         script: |
           LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" 2>/dev/null || echo 0)
           case "$LATEST" in ''|*[!0-9]*) LATEST=0 ;; esac
           cd ios/App && agvtool new-version -all $((LATEST + 1))
       - name: Build the app
-        script: xcode-project build-ipa --project "ios/App/App.xcodeproj" --scheme "App"
+        script: xcode-project build-ipa --project "ios/App/App.xcodeproj" --scheme "App" --config Release
     artifacts:
       - build/ios/ipa/*.ipa
+      - build/signing-summary.json
       - /tmp/xcodebuild_logs/*.log
     publishing:
       app_store_connect:

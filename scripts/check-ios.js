@@ -85,7 +85,7 @@ if (icon) {
 // 5. pipeline values
 const yml = rd('codemagic.yaml');
 check(/BUNDLE_ID: "([^"]+)"/.exec(yml) && /BUNDLE_ID: "([^"]+)"/.exec(yml)[1] === cap.appId, 'codemagic.yaml BUNDLE_ID differs from capacitor.config.json appId.');
-if (process.env.CI) check(/^\d{6,}$/.test(process.env.APP_STORE_APPLE_ID || ''), 'APP_STORE_APPLE_ID is not set to your app\'s Apple ID (a number, from App Store Connect > App Information).');
+if (process.env.CI) check(/^[1-9]\d{5,}$/.test(process.env.APP_STORE_APPLE_ID || ''), 'APP_STORE_APPLE_ID is not set to your app\'s Apple ID (a number, from App Store Connect > App Information).');
 
 if (problems.length) { console.error('iOS preflight found problems:\n- ' + problems.join('\n- ')); process.exit(1); }
 console.log(`iOS preflight passed: ${BUNDLE_ID} · Capacitor ${capVer} · ${Object.keys(pkg.dependencies).length - 2} plugins · push ${PUSH ? 'on' : 'off'}${notes.length ? '\n  ' + notes.join('\n  ') : ''}`);

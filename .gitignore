@@ -9,3 +9,6 @@ ios/DerivedData/
 .DS_Store
 e2e/out/
 bridge/.agent-hq/
+
+# Ephemeral signing material
+.codemagic-signing/
