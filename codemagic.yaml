@@ -29,7 +29,7 @@ workflows:
         script: |
           set -euo pipefail
           npm test
-          python3 -m unittest discover -s test -p 'signing_test.py'
+          python3 -m unittest discover -s test -p 'signing*_test.py'
       - name: Build the web layer, apply iOS settings, sync Capacitor
         script: |
           npm run build
@@ -40,9 +40,10 @@ workflows:
       - name: Signing (distribution certificate and App Store profile are created if missing)
         script: |
           set -euo pipefail
+          python3 scripts/prepare-signing-key.py
           keychain initialize
           mkdir -p .codemagic-signing/profiles
-          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --strict-match-identifier --profiles-dir .codemagic-signing/profiles --create
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --certificate-key @file:.codemagic-signing/certificate-key.pem --type IOS_APP_STORE --strict-match-identifier --profiles-dir .codemagic-signing/profiles --create
           keychain add-certificates
           python3 scripts/prepare-ios-signing.py
       - name: Build number (one higher than the latest TestFlight build)
