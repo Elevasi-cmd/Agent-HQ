@@ -15,6 +15,12 @@
 //
 // Funds: read through a pluggable, read-only balance source. Monzo is not connected yet (stage 5), so the default
 // source says "unavailable" — never a made-up balance — and Big Brain sends a top-up reminder instead.
+//
+// Rules Aaron set (Nov 2026):
+//   balance unreadable  -> checkout goes ahead within the pot limit; a top-up reminder is sent and the ledger says so
+//   price rises         -> an approved item more than 10% (goal.priceRiseCap) dearer than at review is held for review
+//   over-limit basket   -> optional items are dropped, dearest line first, until it fits; refused only if it still can't
+//   budget cycle        -> fixed cycles of periodDays starting on the top-up date (goal.cycleStart), not a rolling window
 const fs = require('fs'), path = require('path'), crypto = require('crypto');
 const { writeAtomic } = require('./events');
 
@@ -80,7 +86,10 @@ function createBigBrain({ dataDir, emit = () => {}, now = () => Date.now(), bala
       merchants: Array.isArray(g.merchants) ? g.merchants.map(String).filter(Boolean) : [],
       mandateHours: Number.isFinite(g.mandateHours) && g.mandateHours > 0 ? g.mandateHours : 48,
       substituteCeiling: Number.isFinite(g.substituteCeiling) && g.substituteCeiling >= 1 ? g.substituteCeiling : 1.10,
+      priceRiseCap: Number.isFinite(g.priceRiseCap) && g.priceRiseCap >= 1 ? g.priceRiseCap : 1.10,
+      cycleStart: g.cycleStart === undefined ? (state.goals[gid] ? state.goals[gid].cycleStart : now()) : g.cycleStart, // the top-up date
     };
+    if (!Number.isFinite(v.cycleStart)) return { ok: false, error: 'cycleStart must be the top-up date (ms since epoch).' };
     if (Number.isNaN(v.budget) || Number.isNaN(v.periodDays) || Number.isNaN(v.maxTotal)) return { ok: false, error: 'budget and maxTotal must be whole pence, periodDays a whole number of days.' };
     if (v.maxTotal > v.budget) return { ok: false, error: 'maxTotal cannot exceed the period budget.' };
     if (!v.merchants.length) return { ok: false, error: 'Name at least one merchant.' };
@@ -91,10 +100,16 @@ function createBigBrain({ dataDir, emit = () => {}, now = () => Date.now(), bala
     return { ok: true, goal: state.goals[gid] };
   }
 
-  // spent in the current period = charges reported for this goal within the last periodDays
+  // the budget cycle containing `at`: fixed blocks of periodDays counted from the top-up date
+  function cycle(goal, at = now()) {
+    const len = goal.periodDays * 24 * HOUR, anchor = Number.isFinite(goal.cycleStart) ? goal.cycleStart : goal.createdAt;
+    const start = anchor + Math.floor((at - anchor) / len) * len;
+    return { start, end: start + len };
+  }
+  // spent in the current cycle = charges reported for this goal since the cycle began
   function spentInPeriod(goal) {
-    const since = now() - goal.periodDays * 24 * HOUR;
-    return readLedger().filter(e => e.type === 'charge' && e.goal === goal.id && e.at >= since).reduce((s, e) => s + e.amount, 0);
+    const { start, end } = cycle(goal);
+    return readLedger().filter(e => e.type === 'charge' && e.goal === goal.id && e.at >= start && e.at < end).reduce((s, e) => s + e.amount, 0);
   }
 
   async function funds(goal, need) {
@@ -118,7 +133,7 @@ function createBigBrain({ dataDir, emit = () => {}, now = () => Date.now(), bala
     if (!Array.isArray(items) || !items.length) return null;
     const out = [];
     for (const i of items) {
-      const it = { id: String(i.id || ''), name: String(i.name || i.id || '').slice(0, 120), qty: i.qty, price: i.price, category: i.category ? String(i.category).slice(0, 60) : null };
+      const it = { id: String(i.id || ''), name: String(i.name || i.id || '').slice(0, 120), qty: i.qty, price: i.price, category: i.category ? String(i.category).slice(0, 60) : null, optional: i.optional === true };
       if (!it.id || !Number.isInteger(it.qty) || it.qty < 1 || Number.isNaN(pence(it.price))) return null;
       out.push(it);
     }
@@ -135,17 +150,27 @@ function createBigBrain({ dataDir, emit = () => {}, now = () => Date.now(), bala
     if (!its) return { ok: false, error: 'Every item needs an id, a whole quantity and a price in pence.' };
     if (!win) return { ok: false, error: 'A delivery window (start, end) is required.' };
     if (Number.isNaN(pence(deliveryFee))) return { ok: false, error: 'deliveryFee must be whole pence.' };
-    const total = basketTotal(its, deliveryFee), spent = spentInPeriod(goal), remaining = goal.budget - spent;
+    const spent = spentInPeriod(goal), remaining = goal.budget - spent;
     const limit = Math.min(goal.maxTotal, remaining);
-    if (total > limit) {
-      record('request-refused', { goal: gid, floor, merchant, total, limit, reason: total > goal.maxTotal ? 'over-max-total' : 'over-remaining-budget' });
-      return { ok: false, error: `Basket ${fmt(total)} is over the limit of ${fmt(limit)}${limit < goal.maxTotal ? ' left this period' : ''}. Drop items and ask again.`, total, limit };
+    // over the limit: drop optional items, dearest line first, until the basket fits
+    const dropped = [];
+    let kept = its.slice(), total = basketTotal(kept, deliveryFee);
+    const optional = kept.filter(i => i.optional).sort((a, b) => b.price * b.qty - a.price * a.qty);
+    while (total > limit && optional.length) { const d = optional.shift(); kept = kept.filter(i => i !== d); dropped.push(d); total = basketTotal(kept, deliveryFee); }
+    if (total > limit || !kept.length) {
+      const full = basketTotal(its, deliveryFee);
+      record('request-refused', { goal: gid, floor, merchant, total: full, limit, reason: full > goal.maxTotal ? 'over-max-total' : 'over-remaining-budget', droppedFirst: dropped.map(i => i.id) });
+      return { ok: false, error: `Basket ${fmt(full)} is over the limit of ${fmt(limit)}${limit < goal.maxTotal ? ' left this cycle' : ''}, even without the optional items. Mark more items optional or ask again with fewer.`, total: full, limit };
+    }
+    if (dropped.length) {
+      record('items-dropped', { goal: gid, floor, items: dropped.map(i => ({ id: i.id, name: i.name, qty: i.qty, price: i.price })), limit, total });
+      tell('items-dropped', { goal: gid, text: `Dropped to fit ${fmt(limit)}: ${dropped.map(i => i.name).join(', ')}.` });
     }
     const f = await funds(goal, total);
     const rid = id('rv');
-    state.reviews[rid] = { id: rid, goal: gid, floor, merchant, items: its, deliveryFee, deliveryWindow: win, total, state: 'awaiting-review', funds: f.status, createdAt: now() };
-    save(); record('review-requested', { review: rid, goal: gid, floor, merchant, total, items: its.length, funds: f.status });
-    tell('review', { review: rid, goal: gid, total, items: its.length });
+    state.reviews[rid] = { id: rid, goal: gid, floor, merchant, items: kept, dropped: dropped.map(i => i.id), deliveryFee, deliveryWindow: win, total, state: 'awaiting-review', funds: f.status, createdAt: now() };
+    save(); record('review-requested', { review: rid, goal: gid, floor, merchant, total, items: kept.length, funds: f.status });
+    tell('review', { review: rid, goal: gid, total, items: kept.length });
     return { ok: true, review: state.reviews[rid], funds: f };
   }
 
@@ -181,7 +206,7 @@ function createBigBrain({ dataDir, emit = () => {}, now = () => Date.now(), bala
     const m = {
       id: mid, goal: rv.goal, merchant: rv.merchant, review: rv.id,
       items: kept.map(i => ({ id: i.id, name: i.name, qty: i.qty, price: i.price, category: i.category })),
-      substitutes: subs, substituteCeiling: goal.substituteCeiling,
+      substitutes: subs, substituteCeiling: goal.substituteCeiling, priceRiseCap: goal.priceRiseCap || 1.10,
       max_total: goal.maxTotal, delivery_window: rv.deliveryWindow,
       expires_at: approvedAt + goal.mandateHours * HOUR,
       approved_by: approvedBy, approved_via: via, approved_at: approvedAt,
@@ -226,11 +251,14 @@ function createBigBrain({ dataDir, emit = () => {}, now = () => Date.now(), bala
     const items = (basket && cleanItems(basket.items)) || null;
     if (!items) return refuse(reasons.concat('malformed-basket'));
     const approved = new Map(m.items.map(i => [i.id, i]));
-    const used = new Map();
+    const used = new Map(), held = [];
     for (let k = 0; k < items.length; k++) {
       const it = items[k], raw = basket.items[k];
       const a = approved.get(it.id);
-      if (a && !raw.substituteFor) { used.set(a.id, (used.get(a.id) || 0) + it.qty); continue; } // a price change on an approved item is caught only by the total (open question)
+      if (a && !raw.substituteFor) {
+        if (it.price > Math.round(a.price * (m.priceRiseCap || 1.10))) { reasons.push('price-rise-held:' + it.id); held.push({ id: a.id, name: a.name, qty: it.qty, was: a.price, now: it.price, category: a.category }); }
+        used.set(a.id, (used.get(a.id) || 0) + it.qty); continue;
+      }
       const orig = raw.substituteFor ? approved.get(String(raw.substituteFor)) : null;
       if (!orig) { reasons.push('unapproved-item:' + it.id); continue; }
       const allowed = m.substitutes[orig.id];
@@ -245,15 +273,29 @@ function createBigBrain({ dataDir, emit = () => {}, now = () => Date.now(), bala
     if (total > m.max_total) reasons.push('over-max-total');
     const slot = cleanWindow(basket.slot);
     if (!slot || slot.start < m.delivery_window.start || slot.end > m.delivery_window.end) reasons.push('outside-delivery-window');
-    if (reasons.length) return refuse(reasons);
+    if (held.length) await holdPriceRises(m, held);
+    if (reasons.length) return Object.assign(refuse(reasons), held.length ? { held: held.map(h => h.id) } : {});
     const goal = state.goals[m.goal];
     const f = await funds(goal, total);
     if (f.status === 'short') return refuse(['funds-short']);
-    if (f.status === 'unreadable' && !m.fundsConfirmed) return refuse(['funds-unconfirmed']);
+    // balance unreadable: go ahead within the pot limit (the mandate's max_total); funds() has already sent the reminder
+    const basis = f.status === 'enough' ? 'balance' : m.fundsConfirmed ? 'confirmed' : 'pot-limit';
     m.state = 'used'; m.usedAt = now(); m.authorisedTotal = total; save();
-    record('authorised', { mandate: mid, total, funds: f.status, fundsConfirmedBy: m.fundsConfirmed ? m.fundsConfirmed.by : null });
+    record('authorised', { mandate: mid, total, funds: f.status, basis, fundsConfirmedBy: m.fundsConfirmed ? m.fundsConfirmed.by : null });
     tell('authorised', { mandate: mid, total });
     return { ok: true, total };
+  }
+
+  // An approved item that got dearer than the cap goes back to Aaron as a fresh review at the new price (once per item).
+  async function holdPriceRises(m, held) {
+    m.heldReviews = m.heldReviews || {};
+    const fresh = held.filter(h => !m.heldReviews[h.id]);
+    if (!fresh.length) return;
+    record('price-rise-held', { mandate: m.id, items: fresh });
+    tell('price-rise-held', { mandate: m.id, text: fresh.map(h => `${h.name} is now ${fmt(h.now)} (was ${fmt(h.was)})`).join('; ') + '. Held for your review.' });
+    const r = await request({ goal: m.goal, merchant: m.merchant, items: fresh.map(h => ({ id: h.id, name: h.name, qty: h.qty, price: h.now, category: h.category })), deliveryWindow: m.delivery_window, floor: 'price-rise:' + m.id });
+    for (const h of fresh) m.heldReviews[h.id] = r.ok ? r.review.id : 'not-raised';
+    save();
   }
 
   // ---------- report: what the bank actually charged ----------
@@ -278,7 +320,7 @@ function createBigBrain({ dataDir, emit = () => {}, now = () => Date.now(), bala
 
   return {
     setGoal, request, submitReview, confirmFunds, authorise, report, revoke, sweep, verifyLedger,
-    goals: () => Object.values(state.goals),
+    goals: () => Object.values(state.goals).map(g => Object.assign({}, g, { cycle: cycle(g), spent: spentInPeriod(g) })),
     reviews: (filter) => Object.values(state.reviews).filter(r => !filter || r.state === filter).sort((a, b) => b.createdAt - a.createdAt),
     mandates: () => { sweep(); return Object.values(state.mandates).sort((a, b) => b.approved_at - a.approved_at); },
     mandate: (mid) => current(mid),

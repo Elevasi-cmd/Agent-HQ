@@ -86,15 +86,66 @@ test('requests over the per-mandate limit or the remaining period budget are ref
   assert.equal(after.ok, false); assert.equal(after.limit, 3000, '£80 budget minus £50 already charged this period');
 });
 
-test('with no balance source the funds check is honest: it sends a reminder and needs Aaron to confirm', async () => {
+test('with no balance source the funds check is honest: it sends a reminder and relies on the pot limit', async () => {
   const t = setup();                                    // default source: Monzo not connected
   const m = await issued(t);
   const rem = t.events.filter(e => e.event === 'funds-reminder');
   assert.ok(rem.length >= 1 && /not connected/i.test(rem[0].text), 'a reminder that names why the balance is unknown');
   assert.ok(!t.bb.ledger().some(e => 'balance' in e && e.kind === 'unreadable'), 'no balance is invented');
-  const r = await t.bb.authorise(m.id, basket()); assert.deepEqual(r.reasons, ['funds-unconfirmed']);
-  assert.equal(t.bb.confirmFunds(m.id, { via: 'phone' }).ok, true);
-  assert.equal((await t.bb.authorise(m.id, basket())).ok, true);
+  const r = await t.bb.authorise(m.id, basket()); assert.equal(r.ok, true, JSON.stringify(r.reasons));
+  const a = t.bb.ledger().find(e => e.type === 'authorised');
+  assert.equal(a.funds, 'unreadable'); assert.equal(a.basis, 'pot-limit', 'the ledger says checkout relied on the pot limit');
+  // still bounded: a basket over the mandate limit is refused even with no balance to read
+  const m2 = await issued(t);
+  assert.ok((await t.bb.authorise(m2.id, basket({ items: [{ id: 'milk', qty: 2, price: 3700 }] }))).reasons.includes('over-max-total'));
+});
+
+test('an approved item more than 10% dearer is held and sent back for review, once', async () => {
+  const t = setup({ balanceSource: { name: 'test', read: async () => ({ status: 'available', balance: 8000 }) } });
+  const m = await issued(t);
+  const ok = await t.bb.authorise(m.id, basket({ items: [{ id: 'milk', qty: 2, price: 182 }, { id: 'bread', qty: 1, price: 140 }] }));
+  assert.equal(ok.ok, true, '182p is within 110% of 165p (181.5 rounded)');
+  const m2 = await issued(t);
+  const r = await t.bb.authorise(m2.id, basket({ items: [{ id: 'milk', qty: 2, price: 183 }, { id: 'bread', qty: 1, price: 140 }] }));
+  assert.equal(r.ok, false); assert.deepEqual(r.reasons, ['price-rise-held:milk']); assert.deepEqual(r.held, ['milk']);
+  const held = t.bb.reviews('awaiting-review').filter(v => v.floor === 'price-rise:' + m2.id);
+  assert.equal(held.length, 1); assert.deepEqual(held[0].items.map(i => [i.id, i.price]), [['milk', 183]]);
+  assert.ok(t.events.some(e => e.event === 'price-rise-held' && /Milk 4 pints is now £1.83 \(was £1.65\)/.test(e.text)));
+  await t.bb.authorise(m2.id, basket({ items: [{ id: 'milk', qty: 2, price: 183 }] }));
+  assert.equal(t.bb.reviews('awaiting-review').filter(v => v.floor === 'price-rise:' + m2.id).length, 1, 'a retry does not raise a second review');
+  assert.equal((await t.bb.authorise(m2.id, basket({ items: [{ id: 'bread', qty: 1, price: 140 }] }))).ok, true, 'the rest can still be bought');
+});
+
+test('an over-limit basket drops optional items, dearest first, and is refused only if it still cannot fit', async () => {
+  const t = setup(); t.bb.setGoal(GOAL, { by: 'desktop' });
+  const items = [
+    { id: 'chicken', name: 'Chicken', qty: 1, price: 5000 },
+    { id: 'wine', name: 'Wine', qty: 1, price: 1500, optional: true },
+    { id: 'crisps', name: 'Crisps', qty: 2, price: 200, optional: true },
+    { id: 'cake', name: 'Cake', qty: 1, price: 900, optional: true },
+  ];                                                     // £85 against a £72 limit
+  const r = await t.bb.request({ goal: 'groceries', merchant: "Sainsbury's", items, deliveryWindow: WINDOW });
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual(r.review.dropped, ['wine'], 'dropping the £15 wine is enough');
+  assert.deepEqual(r.review.items.map(i => i.id), ['chicken', 'crisps', 'cake']); assert.equal(r.review.total, 6300);
+  assert.ok(t.events.some(e => e.event === 'items-dropped' && /Wine/.test(e.text)));
+  const no = await t.bb.request({ goal: 'groceries', merchant: "Sainsbury's", items: [{ id: 'beef', qty: 1, price: 7000 }, { id: 'tea', qty: 1, price: 400 }], deliveryWindow: WINDOW });
+  assert.equal(no.ok, false, 'nothing optional to drop'); assert.equal(no.limit, 7200);
+});
+
+test('the budget runs in fixed cycles from the top-up date', async () => {
+  const topUp = Date.parse('2026-11-24T00:00:00Z');     // a Tuesday, two days before T0
+  const t = setup(); t.bb.setGoal(Object.assign({}, GOAL, { cycleStart: topUp }), { by: 'desktop' });
+  const g = t.bb.goals()[0];
+  assert.equal(g.cycle.start, topUp); assert.equal(g.cycle.end, topUp + 14 * 24 * HOUR);
+  const m = await issued(t); t.bb.report(m.id, { amount: 5000, source: 'test' });
+  assert.equal(t.bb.goals()[0].spent, 5000);
+  t.tick(11 * 24 * HOUR);                                // 7 Dec: still day 13 of the cycle
+  const late = await t.bb.request({ goal: 'groceries', merchant: "Sainsbury's", items: [{ id: 'y', qty: 1, price: 3500 }], deliveryWindow: WINDOW });
+  assert.equal(late.limit, 3000, 'same cycle: £30 left');
+  t.tick(1 * 24 * HOUR);                                 // 8 Dec: the new cycle starts on the top-up date
+  assert.equal(t.bb.goals()[0].spent, 0);
+  assert.equal((await t.bb.request({ goal: 'groceries', merchant: "Sainsbury's", items: [{ id: 'y', qty: 1, price: 3500 }], deliveryWindow: WINDOW })).ok, true);
 });
 
 test('a short pot blocks checkout and the reminder states the shortfall', async () => {
