@@ -12,3 +12,6 @@ bridge/.agent-hq/
 
 # Ephemeral signing material
 .codemagic-signing/
+
+# Python bytecode from running the signing tests
+__pycache__/
