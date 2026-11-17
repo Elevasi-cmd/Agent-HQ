@@ -105,3 +105,15 @@ Everything else is held for you, never run: typed messages, desktop tasks and cl
 Approvals are live only. If the phone isn't on the desktop link, it won't take an approval at all. If the link drops while one is being sent, the app asks the bridge what happened instead of sending it again.
 
 Waiting on the Nexus side: a working text route, reply audio for the phone, task and approval routes, and a way to cancel a turn.
+
+## Big Brain (stage 1)
+
+Big Brain is the only part of Agent HQ that can authorise spending (`lib/bigbrain.js`). Floors ask, you decide by swiping, Big Brain issues a mandate, checks it at checkout and records everything. Nothing here moves money or talks to a bank.
+
+- **Goals** (for example Groceries: £80 per 14 days, £72 per order, Sainsbury's, 48-hour mandates, substitutes up to 110%) are set only from the desktop page (`POST /bigbrain/goal`). Phones can see goals but cannot change them, and no floor can.
+- **Review:** a floor's basket becomes a review (`POST /bigbrain/request` from the page; floors call the library directly from stage 2). You keep or drop each item, with an optional reason, from the phone (`bb-review` command) or the desktop (`POST /bigbrain/review`).
+- **Mandate:** only the kept items, the merchant, a maximum total, the delivery window and an expiry. Items with no substitute chosen at review are dropped if out of stock, never swapped. A mandate is used once; you can revoke it (`bb-revoke`, `POST /bigbrain/revoke`).
+- **Authorise:** just before checkout Big Brain re-checks items, quantities, substitutes (allowed category, at most 110% of the original price), total, merchant, delivery slot, expiry and funds, then marks the mandate used.
+- **Funds:** Big Brain reads the pot through a read-only balance source. Monzo is not connected yet (stage 5), so it says the balance is unavailable and sends a reminder to check the pot. Checkout then needs your confirmation that the pot holds enough (`bb-confirm-funds`). A known shortfall blocks checkout and the reminder states it.
+- **Ledger:** `~/.agent-hq/bigbrain/ledger.jsonl`, append-only, readable only by you, each entry chained to the previous one so any edit shows (`GET /bigbrain/ledger` reports whether it verifies). Charges reported after checkout are flagged when they exceed the mandate.
+- Phone view: `GET /m/bigbrain` (goals, reviews, mandates). Big Brain events stream to the office and phone as `{ type: 'bigbrain', event, … }`.
