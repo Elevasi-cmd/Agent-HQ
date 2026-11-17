@@ -9,6 +9,7 @@ const { createApns } = require('./lib/apns');
 const { createNexusAdapter, clip } = require('./lib/nexus-adapter');
 const { createEventLog, writeAtomic } = require('./lib/events');
 const { createCommandLog } = require('./lib/commands');
+const { createBigBrain } = require('./lib/bigbrain');
 
 const PORT = +(process.env.HQ_PORT || 4317);
 const HOST = process.env.HQ_HOST || '127.0.0.1';
@@ -39,6 +40,10 @@ function send(msg) {
   for (const c of phones.keys()) c.write(line);
 }
 const adapter = createNexusAdapter({ emit: send, dataDir: DATA });
+// Big Brain: goals, swipe reviews, mandates and the ledger. Money is never moved here; Monzo is not connected yet.
+const bigbrain = createBigBrain({ dataDir: DATA, emit: send });
+setInterval(() => bigbrain.sweep(), 60000).unref();
+const bbView = () => ({ goals: bigbrain.goals(), reviews: bigbrain.reviews().slice(0, 20), mandates: bigbrain.mandates().slice(0, 20), balanceSource: bigbrain.balanceSource() });
 
 // Held steps that were waiting when the bridge last stopped can't be answered any more; say so once, in the log.
 for (const id of events.orphanedHooks()) send({ type: 'expired', id, reason: 'bridge-restarted' });
@@ -126,17 +131,22 @@ async function phoneRoute(req, res, url, dev) {
     log('phone connected:', dev.name, r.resync ? `(resync: ${r.reason})` : since ? `(catching up from #${since})` : ''); return;
   }
   // what happened to a command whose answer the phone never got (approvals are checked this way, never blindly resent)
+  // Big Brain, read-only for phones (goals can be seen, never set, from here)
+  if (req.method === 'GET' && p === '/m/bigbrain') return json(res, 200, bbView());
   if (req.method === 'GET' && p.startsWith('/m/command/')) { const id = decodeURIComponent(p.slice(11)); return json(res, 200, commands.status(id)); }
   if (req.method === 'POST' && p === '/m/command') {
     const c = await body(req);
     if (!c || typeof c.id !== 'string' || !/^[\w-]{8,80}$/.test(c.id)) return json(res, 400, { error: 'every command needs an id' });
-    if (!['decide', 'chat', 'task', 'reconcile'].includes(c.type)) return json(res, 400, { error: 'unknown command' });
+    if (!['decide', 'chat', 'task', 'reconcile', 'bb-review', 'bb-revoke', 'bb-confirm-funds'].includes(c.type)) return json(res, 400, { error: 'unknown command' });
     const out = await commands.run(c.id, c.type, async () => {
       switch (c.type) {
         case 'decide': { const r = applyDecision(String(c.hookId || ''), c.decision, c.reason, dev.name); return r.status === 200 ? { ok: true } : { ok: false, gone: true, error: r.body.error }; }
         case 'chat': return Object.assign({ ok: true }, await adapter.chat({ text: clip(c.text, 4000), device: dev.name, cmd: c.id }));
         case 'task': return Object.assign({ ok: true }, await adapter.task({ text: clip(c.text, 4000), device: dev.name, cmd: c.id }));
         case 'reconcile': return Object.assign({ ok: true }, await adapter.reconcile({ messages: Array.isArray(c.messages) ? c.messages.slice(-200) : [], device: dev.name, cmd: c.id }));
+        case 'bb-review': return bigbrain.submitReview(String(c.review || ''), { decisions: c.decisions, substitutes: c.substitutes && typeof c.substitutes === 'object' ? c.substitutes : {}, approvedBy: 'Aaron', via: 'phone:' + dev.name });
+        case 'bb-revoke': return bigbrain.revoke(String(c.mandate || ''), { by: 'Aaron', via: 'phone:' + dev.name });
+        case 'bb-confirm-funds': return bigbrain.confirmFunds(String(c.mandate || ''), { by: 'Aaron', via: 'phone:' + dev.name });
       }
     });
     if (out.state === 'done') { if (!out.known) log('phone command', c.type, c.id); return json(res, 200, out.known ? Object.assign({ duplicate: true }, out.result) : out.result); }
@@ -208,6 +218,20 @@ const server = http.createServer(async (req, res) => {
     // things phones sent that wait for you on the desktop (typed messages, tasks, cloud conversations); nothing here runs by itself
     if (req.method === 'GET' && url.pathname === '/held') { if (!pageOnly(req)) return json(res, 403, { error: 'not allowed' }); return json(res, 200, { items: adapter.held.list().slice(-50).reverse() }); }
     if (req.method === 'POST' && url.pathname === '/held/resolve') { if (!pageOnly(req)) return json(res, 403, { error: 'not allowed' }); const b = await body(req); const ok = adapter.held.resolve(String(b.id || ''), b.status === 'dismissed' ? 'dismissed' : 'reviewed'); return json(res, ok ? 200 : 404, { ok }); }
+    // Big Brain on the desktop page: the only place goals are set
+    if (url.pathname === '/bigbrain' || url.pathname.startsWith('/bigbrain/')) {
+      if (!pageOnly(req)) return json(res, 403, { error: 'not allowed' });
+      if (req.method === 'GET' && url.pathname === '/bigbrain') return json(res, 200, bbView());
+      if (req.method === 'GET' && url.pathname === '/bigbrain/ledger') return json(res, 200, { entries: bigbrain.ledger(200), verified: bigbrain.verifyLedger() });
+      const b = req.method === 'POST' ? await body(req) : {};
+      if (req.method === 'POST' && url.pathname === '/bigbrain/goal') { const r = bigbrain.setGoal(b, { by: 'desktop' }); return json(res, r.ok ? 200 : 400, r); }
+      // a floor's request for review (stage 2 floors call the library directly; this route lets the desktop start one)
+      if (req.method === 'POST' && url.pathname === '/bigbrain/request') { const r = await bigbrain.request(Object.assign({}, b, { floor: b.floor || 'desktop' })); return json(res, r.ok ? 200 : 400, r); }
+      if (req.method === 'POST' && url.pathname === '/bigbrain/review') { const r = bigbrain.submitReview(String(b.review || ''), { decisions: b.decisions, substitutes: b.substitutes || {}, approvedBy: 'Aaron', via: 'desktop' }); return json(res, r.ok ? 200 : 400, r); }
+      if (req.method === 'POST' && url.pathname === '/bigbrain/revoke') { const r = bigbrain.revoke(String(b.mandate || ''), { by: 'Aaron', via: 'desktop' }); return json(res, r.ok ? 200 : 400, r); }
+      if (req.method === 'POST' && url.pathname === '/bigbrain/confirm-funds') { const r = bigbrain.confirmFunds(String(b.mandate || ''), { by: 'Aaron', via: 'desktop' }); return json(res, r.ok ? 200 : 400, r); }
+      return json(res, 404, { error: 'not found' });
+    }
     if (req.method === 'GET' && url.pathname === '/devices') { if (!pageOnly(req)) return json(res, 403, { error: 'not allowed' }); return json(res, 200, { devices: devices.list(), push: !!apns }); }
     if (req.method === 'POST' && url.pathname === '/devices/revoke') { if (!pageOnly(req)) return json(res, 403, { error: 'not allowed' }); const b = await body(req); const ok = devices.remove(String(b.id || '')); if (ok) { for (const [r, id] of phones) if (id === b.id) r.end(); log('phone removed', b.id); } return json(res, ok ? 200 : 404, { ok }); }
     // Claude Code's hooks. The static header stops other web pages posting here (they can't send it without a preflight we never answer).
